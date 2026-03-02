@@ -82,13 +82,16 @@ def main(portal_url:str, portal_name:str, data_path:Path, instrument_IDs:list, u
 
                         
         else: # if a time window was specified by user
+            print(f"---> User Specified start and end time: {start} & {end}\t\t\t\t\t\t\t{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
             url = f"{portal_url}/api/v1/data/{iD}?start={start}&end={end}&email={user_email}&api_key={api_key}"
             response = requests.get(url=url)
             if resources.has_errors(response, portal_name, iD):
                 continue
-
+            
+            print(f"---> Loading all_fields \t\t\t\t\t\t\t{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
             all_fields = loads(dumps(response.json())) # dictionary containing deep copy of JSON-formatted CHORDS data
             
+            print(f"---> Checking for too excess datapoints in all_fields \t\t\t\t\t\t\t{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
             if resources.has_excess_datapoints(all_fields): # reduce timeframe in API call
                 print(f"\t\t Time window specified.\n\t\t Returning data from {time_window_start} -> {time_window_end}")
                 # window_data = resources.time_window(int(iD), timestamp_start, timestamp_end, timestamp_window_start, timestamp_window_end, \
