@@ -82,13 +82,34 @@ def main(portal_url:str, portal_name:str, data_path:Path, instrument_IDs:list, u
 
                         
         else: # if a time window was specified by user
-            print(f"\t\t Time window specified.\n\t\t Returning data from {time_window_start} -> {time_window_end}")
-            window_data = resources.time_window(int(iD), timestamp_start, timestamp_end, timestamp_window_start, timestamp_window_end, \
-                                        portal_url, user_email, api_key, portal_name, data_path, fill_empty) # a list [time, measurements, test, total_num_measurements]
-            time = window_data[0]
-            measurements = window_data[1]
-            test = window_data[2]
-            total_num_measurements = window_data[3]
+            url = f"{portal_url}/api/v1/data/{iD}?start={start}&end={end}&email={user_email}&api_key={api_key}"
+            response = requests.get(url=url)
+            if resources.has_errors(response, portal_name, iD):
+                continue
+
+            all_fields = loads(dumps(response.json())) # dictionary containing deep copy of JSON-formatted CHORDS data
+            
+            if resources.has_excess_datapoints(all_fields): # reduce timeframe in API call
+                print(f"\t\t Time window specified.\n\t\t Returning data from {time_window_start} -> {time_window_end}")
+                # window_data = resources.time_window(int(iD), timestamp_start, timestamp_end, timestamp_window_start, timestamp_window_end, \
+                #                             portal_url, user_email, api_key, portal_name, data_path, fill_empty) # a list [time, measurements, test, total_num_measurements]
+                reduced_data = resources.reduce_datapoints(all_fields['errors'][0], int(iD), timestamp_start, timestamp_end, \
+                                                    portal_url, user_email, api_key, fill_empty)    # list
+                                                                                        # e.g. [time, measurements, test, total_num_measurements]
+                time = reduced_data[0]
+                measurements = reduced_data[1]
+                test = reduced_data[2]
+                total_num_measurements = reduced_data[3]
+            else:
+                data = all_fields['features'][0]['properties']['data']  # list of dictionaries 
+                                                                        # ( e.g. {'time': '2023-12-17T18:45:56Z', 'test': 'false', 'measurements': {'ws': 1.55, 'rain': 1}} )
+                for i in range(len(data)):
+                    time.append(str(data[i]['time']))
+                    total_num_measurements += len(data[i]['measurements'].keys())
+                    total_num_timestamps += 1
+                    to_append = resources.write_compass_direction(dict(data[i]['measurements']), fill_empty)
+                    measurements.append(to_append)
+                    test.append(str(data[i]['test']))
 
         headers = resources.build_headers(measurements, columns_desired, include_test, portal_name) # list of strings 
         time = np.array(time)
