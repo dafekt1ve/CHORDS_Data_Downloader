@@ -27,12 +27,30 @@ def main(portal_url:str, portal_name:str, data_path:Path, instrument_IDs:list, u
                 f"[WARNING]: timestamp_start or timestamp_end in the future: {timestamp_start}\t{timestamp_end}\n\t Will pull up to today's date only.\n"
             )
 
-    if time_window_start != "" or time_window_end != "":
-        format_str = "%H:%M:%S"
-        timestamp_window_start = datetime.strptime(time_window_start, format_str).time()
-        timestamp_window_end = datetime.strptime(time_window_end, format_str).time()
-        if time_window_start > time_window_end:
-            raise ValueError(f"The start time for the time window is after the end time: {time_window_start} > {time_window_end}")
+    # Determine whether a time window was requested. Both start AND end must be provided together.
+    # Initialize window timestamps to None so they are always defined for the processing loop below.
+    timestamp_window_start = None
+    timestamp_window_end = None
+    use_time_window = False  # flag that drives the branching logic below
+
+    if time_window_start != "" and time_window_end != "":
+        # Both endpoints were supplied — parse and validate them.
+        format_str_window = "%H:%M:%S"
+        timestamp_window_start = datetime.strptime(time_window_start, format_str_window).time()
+        timestamp_window_end   = datetime.strptime(time_window_end,   format_str_window).time()
+        # Compare the parsed time objects, NOT the raw strings (avoids lexicographic edge cases).
+        if timestamp_window_start > timestamp_window_end:
+            raise ValueError(
+                f"The start time for the time window is after the end time: "
+                f"{time_window_start} > {time_window_end}"
+            )
+        use_time_window = True
+    elif time_window_start != "" or time_window_end != "":
+        # Only one of the two was provided — that is ambiguous, so raise early.
+        raise ValueError(
+            "Both -time_window_start and -time_window_end must be provided together. "
+            f"Received: time_window_start='{time_window_start}', time_window_end='{time_window_end}'"
+        )
 
     from chords_downloader.resources.functions import PORTAL_LOOKUP 
     if portal_name.lower() not in PORTAL_LOOKUP:
@@ -45,79 +63,67 @@ def main(portal_url:str, portal_name:str, data_path:Path, instrument_IDs:list, u
 
         print(f"---> Reading instrument ID {iD}\t\t\t\t\t\t\t{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
-        if time_window_start == "" and time_window_end == "":
-            time = [] # list of strings  (e.g. '2023-12-17T00:00:04Z')
-            measurements = [] # list of dictionaries  (e.g. {'t1': 25.3, 'uv1': 2, 'rh1': 92.7, 'sp1': 1007.43, 't2': 26.9, 'vis1': 260, 'ir1': 255, 'msl1': 1013.01, 't3': 26.1})
-            test = [] # list of strings of whether data point is a test value (either 'true' or 'false')
+        if not use_time_window:
+            # ---- Standard path: download full date range, no time-of-day filtering ----
+            time         = []  # list of strings  (e.g. '2023-12-17T00:00:04Z')
+            measurements = []  # list of dicts    (e.g. {'t1': 25.3, 'rh1': 92.7, ...})
+            test         = []  # list of strings  ('true' or 'false')
 
             total_num_measurements = 0
-            total_num_timestamps = 0
+            total_num_timestamps   = 0
 
             url = f"{portal_url}/api/v1/data/{iD}?start={start}&end={end}&email={user_email}&api_key={api_key}"
             response = requests.get(url=url)
             if resources.has_errors(response, portal_name, iD):
                 continue
 
-            all_fields = loads(dumps(response.json())) # dictionary containing deep copy of JSON-formatted CHORDS data
+            # Deep copy of JSON-formatted CHORDS response
+            all_fields = loads(dumps(response.json()))
             
-            if resources.has_excess_datapoints(all_fields): # reduce timeframe in API call
+            if resources.has_excess_datapoints(all_fields):
+                # Response hit the 200 000-observation API cap — chunk it into smaller calls.
                 print("\t Large data request -- reducing.")
-                reduced_data = resources.reduce_datapoints(all_fields['errors'][0], int(iD), timestamp_start, timestamp_end, \
-                                                    portal_url, user_email, api_key, fill_empty)    # list
-                                                                                        # e.g. [time, measurements, test, total_num_measurements]
-                time = reduced_data[0]
-                measurements = reduced_data[1]
-                test = reduced_data[2]
+                reduced_data = resources.reduce_datapoints(
+                    all_fields['errors'][0], int(iD), timestamp_start, timestamp_end,
+                    portal_url, user_email, api_key, fill_empty
+                )   # returns [time, measurements, test, total_num_measurements]
+                time                   = reduced_data[0]
+                measurements           = reduced_data[1]
+                test                   = reduced_data[2]
                 total_num_measurements = reduced_data[3]
             else:
-                data = all_fields['features'][0]['properties']['data']  # list of dictionaries 
-                                                                        # ( e.g. {'time': '2023-12-17T18:45:56Z', 'test': 'false', 'measurements': {'ws': 1.55, 'rain': 1}} )
+                # Response is within limits — parse it directly.
+                data = all_fields['features'][0]['properties']['data']
+                # data is a list of dicts: {'time': '...Z', 'test': 'false', 'measurements': {...}}
                 for i in range(len(data)):
                     time.append(str(data[i]['time']))
                     total_num_measurements += len(data[i]['measurements'].keys())
-                    total_num_timestamps += 1
+                    total_num_timestamps   += 1
                     to_append = resources.write_compass_direction(dict(data[i]['measurements']), fill_empty)
                     measurements.append(to_append)
                     test.append(str(data[i]['test']))
 
-                        
-        else: # if a time window was specified by user
-            print(f"---> User Specified start and end time: {start} & {end}\t\t\t\t\t\t\t{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-            url = f"{portal_url}/api/v1/data/{iD}?start={start}&end={end}&email={user_email}&api_key={api_key}"
-            response = requests.get(url=url)
-            if resources.has_errors(response, portal_name, iD):
-                continue
-            
-            print(f"---> Loading all_fields \t\t\t\t\t\t\t{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-            all_fields = loads(dumps(response.json())) # dictionary containing deep copy of JSON-formatted CHORDS data
-            
-            print(f"---> Checking for too excess datapoints in all_fields \t\t\t\t\t\t\t{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-            if resources.has_excess_datapoints(all_fields): # reduce timeframe in API call
-                print(f"\t\t Time window specified.\n\t\t Returning data from {time_window_start} -> {time_window_end}")
-                # window_data = resources.time_window(int(iD), timestamp_start, timestamp_end, timestamp_window_start, timestamp_window_end, \
-                #                             portal_url, user_email, api_key, portal_name, data_path, fill_empty) # a list [time, measurements, test, total_num_measurements]
-                reduced_data = resources.reduce_datapoints(all_fields['errors'][0], int(iD), timestamp_start, timestamp_end, \
-                                                    portal_url, user_email, api_key, fill_empty)    # list
-                                                                                        # e.g. [time, measurements, test, total_num_measurements]
-                time = reduced_data[0]
-                measurements = reduced_data[1]
-                test = reduced_data[2]
-                total_num_measurements = reduced_data[3]
-            else:
-                data = all_fields['features'][0]['properties']['data']  # list of dictionaries 
-                                                                        # ( e.g. {'time': '2023-12-17T18:45:56Z', 'test': 'false', 'measurements': {'ws': 1.55, 'rain': 1}} )
-                for i in range(len(data)):
-                    time.append(str(data[i]['time']))
-                    total_num_measurements += len(data[i]['measurements'].keys())
-                    total_num_timestamps += 1
-                    to_append = resources.write_compass_direction(dict(data[i]['measurements']), fill_empty)
-                    measurements.append(to_append)
-                    test.append(str(data[i]['test']))
+        else:
+            # ---- Time-window path: return only observations within a daily HH:MM:SS window ----
+            # resources.time_window() handles both the API chunking AND the hourly filtering.
+            print(f"\t\t Time window specified.\n\t\t Returning data from {time_window_start} -> {time_window_end}")
+            window_data = resources.time_window(
+                int(iD),
+                timestamp_start, timestamp_end,               # full date range bounds
+                timestamp_window_start, timestamp_window_end,  # daily time-of-day filter
+                portal_url, user_email, api_key,
+                portal_name, data_path, fill_empty
+            )   # returns [time, measurements, test, total_num_measurements]
+            time                   = window_data[0]
+            measurements           = window_data[1]
+            test                   = window_data[2]
+            total_num_measurements = window_data[3]
 
-        headers = resources.build_headers(measurements, columns_desired, include_test, portal_name) # list of strings 
-        time = np.array(time)
+        # ---- Build output regardless of which path was taken ----
+        headers      = resources.build_headers(measurements, columns_desired, include_test, portal_name)
+        time         = np.array(time)
         measurements = np.array(measurements)
-        test = np.array(test)
+        test         = np.array(test)
         
         if resources.struct_has_data(measurements, time, test): 
             file_path = data_path / f"{portal_name}_Instrument-{iD}_{timestamp_start.date()}_{timestamp_end.date()}.csv"
@@ -149,8 +155,8 @@ def parse_args() -> tuple[str, str, Path, list[int], str, str, str, str]:
     parser.add_argument("-fill_empty",                      help="Enter whatever value should be used to signal no data (e.g. -999.99 or 'NaN'). Empty string by default (creates smaller files).")
     parser.add_argument("-include_test",        type=bool,  help="Set to True to include boolean columns next to each data column which specify whether data collected was test data (False by default). ")
     parser.add_argument("-columns_desired",     type=list,  help="Enter the shortnames for the columns to include in csv (e.g. ['t1', 't2', 't3']). Includes all if left blank.")
-    parser.add_argument("-time_window_start",   type=str,   help="Timestamp from which to collect subset of data (MUST be in the following format: 'HH:MM:SS'). Includes all timestamps if left blank.")
-    parser.add_argument("-time_window_end",     type=str,   help="Timestamp from which to stop collecting subset of data (MUST be in the following format: 'HH:MM:SS') Includes all timestamps if left blank.")
+    parser.add_argument("-time_window_start",   type=str,   default="", help="Timestamp from which to collect subset of data (MUST be in the following format: 'HH:MM:SS'). Includes all timestamps if left blank.")
+    parser.add_argument("-time_window_end",     type=str,   default="", help="Timestamp from which to stop collecting subset of data (MUST be in the following format: 'HH:MM:SS'). Includes all timestamps if left blank.")
 
     args = parser.parse_args()
     return (
